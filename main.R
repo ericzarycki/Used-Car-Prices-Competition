@@ -21,11 +21,8 @@ library(corrplot)
 library(dplyr)
 library(ggplot2)
 library(caret)
-library(xgboost)
-library(fastDummies)
 library(mltools)
 library(data.table)
-library(FeatureHashing)
 library(tidymodels)
 
 
@@ -33,9 +30,9 @@ library(tidymodels)
 train <- read.csv("data/train.csv")
 test <- read.csv("data/test.csv")
 
-train.df <- train %>% select(price, brand, model, engine, fuel_type, transmission, accident, model_year, milage) %>%
+train.df <- train %>% select(price, brand, model, engine, fuel_type, transmission, accident, model_year, milage, ext_col, int_col) %>%
   mutate(price = log10(price)) %>% mutate_if(is.character, factor)
-test.df <- test %>% select(brand, model, engine, fuel_type, transmission, accident, model_year, milage)
+test.df <- test %>% select(brand, model, engine, fuel_type, transmission, accident, model_year, milage, ext_col, int_col)
 
 #
 set.seed(88)
@@ -44,7 +41,7 @@ train.t <- training(train.split)
 train.v <- testing(train.split)
 
 #Re-sampl
-train.fold <- vfold_cv(train.t, strata = price, v=10)
+train.fold <- vfold_cv(train.t, strata = price, v=8)
 train.fold
 
 library(usemodels)
@@ -56,11 +53,11 @@ library(textrecipes)
 library(hardhat)
 ranger_recipe <- 
   recipe(formula = price ~ ., data = train.t) %>%
-  step_other(brand,model,engine,transmission, threshold = 0.01) %>% textrecipes::step_clean_levels(model,engine,transmission)
+  step_other(brand,model,engine,transmission, ext_col,int_col, threshold = 0.01) %>% textrecipes::step_clean_levels(model,engine,transmission,ext_col, int_col)
 
 
 ranger_spec <- 
-  rand_forest(mtry = tune(), min_n = tune(), trees = 200) %>% 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 20) %>% 
   set_mode("regression") %>% 
   set_engine("ranger") 
 
@@ -83,7 +80,8 @@ autoplot(ranger_tune)
 
 
 #Feature Importance
-
+imp_spec <- ranger_spec %>% finalize_model(select_best(ranger_tune)) %>% set_engine("ranger", importance="permutation")
+workflow() %>% add_recipe(ranger_recipe) %>% add_model(imp_spec) %>% fit(train.t) %>% vip()
 
 final_rf <-
   ranger_workflow %>% finalize_workflow(select_best(ranger_tune))
