@@ -11,6 +11,7 @@
 # install.packages("data.table")
 # install.packages("FeatureHashing")
 # install.packages("fastDummies") # For one-hot
+# install.packages("tidymodels")
 
 # Load libraries
 
@@ -25,131 +26,79 @@ library(fastDummies)
 library(mltools)
 library(data.table)
 library(FeatureHashing)
+library(tidymodels)
 
 
 # Import Train and Test Datasets from Kaggle
 train <- read.csv("data/train.csv")
 test <- read.csv("data/test.csv")
 
+train.df <- train %>% select(price, brand, model, engine, fuel_type, transmission, accident, model_year, milage) %>%
+  mutate(price = log10(price)) %>% mutate_if(is.character, factor)
+test.df <- test %>% select(brand, model, engine, fuel_type, transmission, accident, model_year, milage)
 
-##########################Exploratory Data Analysis###########################
+#
+set.seed(88)
+train.split <- initial_split(train.df, strata = price)
+train.t <- training(train.split)
+train.v <- testing(train.split)
+
+#Re-sampl
+train.fold <- vfold_cv(train.t, strata = price, v=10)
+train.fold
+
+library(usemodels)
+
+use_ranger(price ~., data = train.t)
+
+#######
+library(textrecipes)
+library(hardhat)
+ranger_recipe <- 
+  recipe(formula = price ~ ., data = train.t) %>%
+  step_other(brand,model,engine,transmission, threshold = 0.01) %>% textrecipes::step_clean_levels(model,engine,transmission)
 
 
-#############Data Cleaning##################################################
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 200) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger") 
 
-#Check for missing values
-colSums(is.na(train))
-colSums(is.na(test))
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe,
+             blueprint = hardhat::default_recipe_blueprint(allow_novel_levels = TRUE)) %>% 
+  add_model(ranger_spec) 
 
-##################################Feature Hashing for XGBoost################
-#Remove and Store Predictor Variables in Train (ID and Price)
-train_labels <- train$price
-train_ids <- train$id
-train.cleaned <- train %>% dplyr::select(-price, -id)
-#And Test (ID)
-test_ids <- test$id
-test.cleaned <- test %>% dplyr::select(-id)
+set.seed(11928)
+doParallel::registerDoParallel()
+ranger_tune <-
+  tune_grid(ranger_workflow, resamples = train.fold, grid = 11)
 
-train.hashed <- hashed.model.matrix(~., data=train.cleaned, hash.size=2^6, transpose=FALSE)
-test.hashed <- hashed.model.matrix(~., data = test.cleaned, hash.size = 2^6, transpose = FALSE)
 
-dtrain <- xgb.DMatrix(train.hashed,label = train_labels)
-dtest <- xgb.DMatrix(test.hashed)
+show_best(ranger_tune, metric="rmse")
+show_best(ranger_tune, metric="rsq")
 
-mod.xgb <- xgboost(data = dtrain,
-               label = train_labels,
-               nrounds = 100,
-               max_depth = 6,
-               objective = 'reg:squarederror',
-               verbose = 1)
+autoplot(ranger_tune)
+
 
 #Feature Importance
-# xgb_i <- xgb.importance(feature_names = colnames(train_data),
-#                         model=bst)
-# head(xgb_i)
-
-# Predict on Test Set
-predTest <- predict(mod.xgb, newdata=dtest)
-
-#Measuring Model Performance
-rmse <- sqrt(mean((train_labels - predTest)^2))
-print(paste("RMSE:", rmse))
-
-#Submission
-submission <- data.frame(id = test$id, price = predTest)
-
-# Save the submission file as CSV without row names
-write.csv(submission, file = "submission.csv", row.names = FALSE)
 
 
+final_rf <-
+  ranger_workflow %>% finalize_workflow(select_best(ranger_tune))
 
+train.fit <- last_fit(final_rf, train.split)
 
+collect_metrics(train.fit)
 
-#########################Creating the Model##############################
-#Remove engine, transmission, fuel_type, model
-# train.cleaned <- train %>% dplyr::select(-engine,-transmission,-model,-id, -ext_col,-int_col)
-# 
-# # Same for validation data
-# test.cleaned <- test %>% dplyr::select(-engine,-transmission,-model,-id, -ext_col,-int_col)
-# 
-# ###########################One-hot encode############################
-# 
-# # One-hot encode categorical variables
-# train.onehot <- dummy_cols(train.cleaned, select_columns = c("brand", "fuel_type",
-#            "accident", "clean_title"))
-# 
-# 
-# # One-hot encode categorical variables
-# test.onehot <- dummy_cols(test.cleaned, select_columns = c("brand", "fuel_type", 
-#                                                            "accident", "clean_title"))
-# 
-# ###############Remove Original Columns#########################
-# train.onehot.cleaned <- 
-#   train.onehot %>%
-#   dplyr::select(-brand,-fuel_type,
-#                 -accident, -clean_title, -brand_Polestar, -brand_smart)
-# 
-# # Remove original categorical columns (same as training)
-# test.onehot.cleaned <- test.onehot %>% dplyr::select(-brand, -fuel_type, -accident, -clean_title)
-# 
-# #########################Make Sure everything is Numeric for Matrix#############
-# 
-# train.onehot.ready <- train.onehot.cleaned %>% mutate_if(is.integer, as.numeric)
-# test.onehot.ready <- test.onehot.cleaned %>% mutate_if(is.integer, as.numeric)
-# 
-# 
-# ############################MODEL############################
-# set.seed(88)
-# train_indices <- sample(1:nrow(train.onehot.ready), size = 0.8 * nrow(train.onehot.ready))
-# 
-# #
-# train_data <- train.onehot.ready[train_indices, ]
-# val_data <- train.onehot.ready[-train_indices, ]
-# 
-# train_labels <- train$price[train_indices]
-# val_labels <- train$price[-train_indices]
-# 
-# train_data <- train_data %>% dplyr::select(-price)
-# 
-# dtrain <- xgb.DMatrix(data = as.matrix(train_data), label = train_labels)
-# dval <- xgb.DMatrix(data = as.matrix(val_data), label = val_labels)
-# 
-# # Model
-# bst <- xgboost(data = as.matrix(train_data),
-#                label = train_labels,
-#                nrounds = 100,
-#                max_depth = 6,
-#                objective = 'reg:squarederror',
-#                verbose = 1)
-# 
-# 
-# 
-# #Plot the Feature Importance for the Model
-# xgb.plot.importance(xgb_i)
+collect_predictions(train.fit) %>% ggplot(aes(price,.pred))+
+  geom_abline(lty=2, color="gray50") +
+  geom_point(alpha = 0.5, color="midnightblue") +
+  coord_fixed()
 
-
-
-#####################################################################
-#1 Submission RMSE: 86683.73
-#2 Submission RMSE: 86096.4182781538
-
+########################SUBMISSION
+final_rf_fitted <- fit(final_rf, data = train.df)
+test.pred <- predict(final_rf_fitted, new_data = test.df)
+submission <- data.frame(id = test$id, price = 10^test.pred$.pred)
+write.csv(submission, "submission.csv", row.names = FALSE)
