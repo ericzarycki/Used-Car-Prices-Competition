@@ -41,7 +41,7 @@ train.t <- training(train.split)
 train.v <- testing(train.split)
 
 #Re-sampl
-train.fold <- vfold_cv(train.t, strata = price, v=8)
+train.fold <- vfold_cv(train.t, strata = price, v=5)
 train.fold
 
 library(usemodels)
@@ -57,7 +57,7 @@ ranger_recipe <-
 
 
 ranger_spec <- 
-  rand_forest(mtry = tune(), min_n = tune(), trees = 20) %>% 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 10) %>% 
   set_mode("regression") %>% 
   set_engine("ranger") 
 
@@ -80,6 +80,7 @@ autoplot(ranger_tune)
 
 
 #Feature Importance
+library(vip)
 imp_spec <- ranger_spec %>% finalize_model(select_best(ranger_tune)) %>% set_engine("ranger", importance="permutation")
 workflow() %>% add_recipe(ranger_recipe) %>% add_model(imp_spec) %>% fit(train.t) %>% vip()
 
